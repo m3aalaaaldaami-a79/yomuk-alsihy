@@ -1,0 +1,293 @@
+name: Build HTML to Android APK
+
+on:
+  push:
+    branches: [ "*" ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 3. Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 4. Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: 5. Auto-Generate Native Android WebView Project from index.html
+        run: |
+          mkdir -p android-app/app/src/main/assets
+          mkdir -p android-app/app/src/main/java/com/alsahlany/alaa
+          mkdir -p android-app/app/src/main/res/mipmap-xxxhdpi
+
+          if [ -f "index.html" ]; then
+            cp index.html android-app/app/src/main/assets/index.html
+          elif [ -f "app/src/main/assets/index.html" ]; then
+            cp app/src/main/assets/index.html android-app/app/src/main/assets/index.html
+          else
+            echo "<h1>App Ready</h1>" > android-app/app/src/main/assets/index.html
+          fi
+
+          # Generate a valid PNG launcher icon via Python
+          python3 - << 'PY'
+          import struct, zlib
+          def make_png(width, height, rgb):
+              raw = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+              def chunk(tag, data):
+                  return struct.pack("!I", len(data)) + tag + data + struct.pack("!I", zlib.crc32(tag + data) & 0xffffffff)
+              return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+          open("android-app/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png", "wb").write(make_png(192, 192, (5, 150, 105)))
+          PY
+
+          cat << 'EOF' > android-app/settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "HtmlToApkApp"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > android-app/build.gradle
+          plugins {
+              id 'com.android.application' version '8.3.0' apply false
+          }
+          EOF
+
+          cat << 'EOF' > android-app/gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          EOF
+
+          cat << 'EOF' > android-app/app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+          
+          android {
+              namespace 'com.alsahlany.alaa'
+              compileSdk 34
+          
+              defaultConfig {
+                  applicationId "com.alsahlany.alaa"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0.0"
+              }
+          
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+                  debug {
+                      debuggable true
+                  }
+              }
+          
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          
+          dependencies {
+          }
+          EOF
+
+          cat << 'EOF' > android-app/app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.alsahlany.alaa">
+          
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+          
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="عافيتي — منظم العلاجات وقراءات"
+                  android:usesCleartextTraffic="true"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+          
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > android-app/app/src/main/java/com/alsahlany/alaa/MainActivity.java
+          package com.alsahlany.alaa;
+          
+          import android.app.Activity;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.print.PrintAttributes;
+          import android.print.PrintDocumentAdapter;
+          import android.print.PrintManager;
+          import android.view.View;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          
+          public class MainActivity extends Activity {
+              private WebView webView;
+              private ValueCallback<Uri[]> filePathCallback;
+              private static final int FILE_CHOOSER_RESULT_CODE = 1001;
+          
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+          
+                  Window window = getWindow();
+                  window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
+                  window.setStatusBarColor(Color.parseColor("#047857"));
+          
+                  webView = new WebView(this);
+                  setContentView(webView);
+          
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setAllowFileAccess(true);
+                  settings.setAllowContentAccess(true);
+                  settings.setLoadWithOverviewMode(true);
+                  settings.setUseWideViewPort(true);
+                  settings.setSupportMultipleWindows(false);
+                  settings.setDefaultTextEncodingName("utf-8");
+          
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          Uri uri = request.getUrl();
+                          return handleUri(view, uri);
+                      }
+          
+                      @SuppressWarnings("deprecation")
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                          return handleUri(view, Uri.parse(url));
+                      }
+          
+                      private boolean handleUri(WebView view, Uri uri) {
+                          String scheme = uri.getScheme();
+                          String host = uri.getHost() != null ? uri.getHost().toLowerCase() : "";
+                          if ("file".equals(scheme)) {
+                              return false;
+                          }
+                          if (true && ("whatsapp".equals(scheme) || "tel".equals(scheme) || "mailto".equals(scheme) || "intent".equals(scheme) || host.contains("wa.me") || host.contains("whatsapp.com"))) {
+                              try {
+                                  Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+                                  startActivity(intent);
+                              } catch (Exception ignored) {}
+                              return true;
+                          }
+                          return false;
+                      }
+                  });
+          
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+                          if (!true) return false;
+                          if (MainActivity.this.filePathCallback != null) {
+                              MainActivity.this.filePathCallback.onReceiveValue(null);
+                          }
+                          MainActivity.this.filePathCallback = filePathCallback;
+                          try {
+                              Intent intent = fileChooserParams.createIntent();
+                              startActivityForResult(intent, FILE_CHOOSER_RESULT_CODE);
+                          } catch (Exception e) {
+                              MainActivity.this.filePathCallback = null;
+                              return false;
+                          }
+                          return true;
+                      }
+                  });
+          
+                  webView.loadUrl("file:///android_asset/index.html");
+              }
+          
+              public void printCurrentPage() {
+                  if (!true) return;
+                  PrintManager printManager = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+                  if (printManager != null && webView != null) {
+                      PrintDocumentAdapter adapter = webView.createPrintDocumentAdapter("عافيتي — منظم العلاجات وقراءات");
+                      printManager.print("عافيتي — منظم العلاجات وقراءات", adapter, new PrintAttributes.Builder().build());
+                  }
+              }
+          
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  if (requestCode == FILE_CHOOSER_RESULT_CODE) {
+                      if (filePathCallback == null) return;
+                      Uri[] results = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+                      filePathCallback.onReceiveValue(results);
+                      filePathCallback = null;
+                  } else {
+                      super.onActivityResult(requestCode, resultCode, data);
+                  }
+              }
+          
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) {
+                      webView.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          EOF
+
+      - name: 6. Compile Android APK with Gradle
+        working-directory: android-app
+        run: gradle assembleDebug
+
+      - name: 7. Upload Ready APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alaa-apk
+          path: android-app/app/build/outputs/apk/debug/app-debug.apk
